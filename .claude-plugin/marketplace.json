@@ -1,0 +1,13 @@
+{
+  "name": "falkoro",
+  "description": "Claude Code mods by falkoro",
+  "owner": {
+    "name": "falkoro"
+  },
+  "plugins": [
+    {
+      "name": "secrets",
+      "source": "./"
+    }
+  ]
+}
