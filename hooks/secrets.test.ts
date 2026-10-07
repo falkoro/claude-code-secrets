@@ -2,6 +2,10 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { store, unmask, validName } from './register'
 
+// tsc gives up on the full tool union (TS2589) at these call sites; the tests read results loosely.
+type Ran = { result?: unknown; deny?: string; context?: readonly string[] }
+const call = ($: { tool: { call: Function } }, args: Record<string, unknown>) => $.tool.call(args) as Promise<Ran>
+
 test('unmask recovers the typed value from the bullets', () => {
   expect(unmask('', 'sk-abc')).toBe('sk-abc')
   expect(unmask('sk-abc', '••••••d')).toBe('sk-abcd')
@@ -38,7 +42,7 @@ for (const c of cases) {
       return { result: { stdout: 'key=sk-live-1234567890', stderr: '', interrupted: false } }
     })
 
-    const ran = await $.tool.call({ tool: 'Bash', command: 'echo key=$OPENAI_API_KEY' })
+    const ran = await call($, { tool: 'Bash', command: 'echo key=$OPENAI_API_KEY' })
 
     expect(command).toContain(c.line)
     expect(command).not.toContain('sk-live')
@@ -58,10 +62,28 @@ test('other tools are scrubbed too: Read of a .env', async ($, on) => {
   on('process.run', ($, e) => ({
     value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Linux\n' : 'sk-live-1234567890', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('tool.call', { tool: 'Read' }, () => ({ result: { type: 'text', file: { filePath: '.env', content: '1\tOPENAI_API_KEY=sk-live-1234567890' } } }))
+  on('tool.call', { tool: 'Read' }, () => ({
+    result: { type: 'text', file: { filePath: '.env', content: '1\tOPENAI_API_KEY=sk-live-1234567890' } },
+    context: ['a note'],
+  }))
 
-  const ran = await $.tool.call({ tool: 'Read', file_path: '.env' })
+  const ran = await call($, { tool: 'Read', file_path: '.env' })
 
-  expect(JSON.stringify(ran.result)).not.toContain('sk-live')
+  expect(JSON.stringify(ran)).not.toContain('sk-live')
   expect(JSON.stringify(ran.result)).toContain('OPENAI_API_KEY=[secret:OPENAI_API_KEY]')
+  expect(ran.context).toEqual(['a note'])
+})
+
+test('a note from another hook that holds the key withholds the output', async ($, on) => {
+  mock.store(on, { names: ['OPENAI_API_KEY'] })
+  mock.env(on, {})
+  on('process.run', ($, e) => ({
+    value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Linux\n' : 'sk-live-1234567890', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('tool.call', { tool: 'Read' }, () => ({ result: { type: 'text', file: { filePath: 'x', content: 'x' } }, context: ['saw sk-live-1234567890'] }))
+
+  const ran = await call($, { tool: 'Read', file_path: 'x' })
+
+  expect(JSON.stringify(ran)).not.toContain('sk-live')
+  expect(ran.deny).toContain('withheld')
 })

@@ -1,6 +1,6 @@
 {
   "name": "secrets",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Claude asks for API keys in a masked field above the prompt, saves them to the macOS Keychain, Linux keyring or Windows DPAPI, and uses them in Bash without ever seeing them",
   "types": "./types/index.d.ts",
   "author": {

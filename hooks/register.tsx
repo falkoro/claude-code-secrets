@@ -113,7 +113,7 @@ const ask = async ($: EngineInterface, env_var: string, reason: string, signal?:
   const [argv, stdin] = store(await detect($), env_var, secret)
   const stored = await $.process.run(argv, { stdin })
   // Read it back: `security -i` exits 0 even when its command failed.
-  if ((await readSecret($, env_var)) !== secret) return `Could not save ${env_var} to the keychain. ${stored.stderr.split(secret).join('[secret]').trim()}`
+  if ((await readSecret($, env_var)) !== secret) return `Could not save ${env_var} to the keychain (exit ${stored.exitCode}).`
   values.set(env_var, secret)
   const names = await savedNames($)
   if (!names.includes(env_var)) await $.store.set('names', [...names, env_var])
@@ -173,9 +173,13 @@ export const register: Register = on => {
     const current = await detect($)
     const exports = [...values.keys()].map(n => `export ${n}="$(${lookup(current, n).map(sh).join(' ')})"`).join('\n')
     const ran = await next(e.tool === 'Bash' ? { ...e, command: `${exports}\n${e.command}` } : e)
-    if (ran.result === undefined) return ran
+    if (ran.deny !== undefined) return redact(ran.deny) === ran.deny ? ran : { deny: redact(ran.deny) }
+    if (JSON.stringify(scrub(ran)) === JSON.stringify(ran)) return ran
+    // Another hook's notes can't be rewritten, only withheld whole.
+    if (ran.context?.some(note => redact(note) !== note)) return { deny: 'secrets: output withheld, a note on it held a saved secret.' }
+    // Core's `text` and `ref` carry the unredacted output: answer with a fresh result, never the object `next` gave.
     const result = scrub(ran.result)
-    return JSON.stringify(result) === JSON.stringify(ran.result) ? ran : { ...ran, result }
+    return ran.isError ? { isError: true, result, text: redact(ran.text ?? ''), context: ran.context } : { result, context: ran.context }
   }).catch(($, e, next) => (next.called ? { deny: 'secrets: redaction failed, output withheld.' } : next(e)))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
