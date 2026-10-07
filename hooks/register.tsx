@@ -5,8 +5,14 @@ import type { Ask } from '../types'
 
 const SERVICE = 'claude-code'
 const BULLET = '•'
-// Names end up in a shell line, so only plain env var names get in.
+// Names end up in a shell line, so only plain env var names get in, and none that steer the shell,
+// the loader or an interpreter: a secret must not become $PATH or $BASH_ENV. Case-blind for Windows.
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
+const RESERVED =
+  /^(PATH|HOME|SHELL|USER|IFS|ENV|PWD|OLDPWD|CDPATH|TERM|TMPDIR|PS[0-4]|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|GLOBIGNORE|NODE_OPTIONS|RUBYOPT|(BASH|LD|DYLD|GIT|LC)_\w*|PYTHON\w*|PERL\w*)$/i
+export const validName = (name: string) => ENV_NAME.test(name) && !RESERVED.test(name)
+// Shorter values can't be redacted without mangling ordinary output.
+const MIN_LENGTH = 8
 
 const asking = atom({ plugin: 'secrets', key: 'asking' } as const, null as Ask | null)
 
@@ -71,16 +77,22 @@ export const unmask = (real: string, shown: string): string => {
 }
 
 const redact = (text: string) => {
-  for (const [name, value] of values) if (value.length >= 8) text = text.split(value).join(`[secret:${name}]`)
+  for (const [name, value] of values) if (value.length >= MIN_LENGTH) text = text.split(value).join(`[secret:${name}]`)
   return text
 }
+
+const scrub = (v: unknown): unknown =>
+  typeof v === 'string' ? redact(v)
+  : Array.isArray(v) ? v.map(scrub)
+  : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrub(x)]))
+  : v
 
 const savedNames = async ($: EngineInterface) => ((await $.store.get('names')) as string[] | undefined) ?? []
 
 const load = async ($: EngineInterface) => {
   if (loaded) return
   loaded = true
-  for (const name of (await savedNames($)).filter(n => ENV_NAME.test(n))) {
+  for (const name of (await savedNames($)).filter(validName)) {
     const value = await readSecret($, name)
     if (value) values.set(name, value)
   }
@@ -96,11 +108,12 @@ const ask = async ($: EngineInterface, env_var: string, reason: string, signal?:
   typed = ''
   await update($, asking, () => null)
   if (!secret) return `The user cancelled; ${env_var} was not saved. Do not ask them to paste it into the chat.`
+  if (secret.length < MIN_LENGTH) return `${env_var} was not saved: under ${MIN_LENGTH} characters is too short to hide from output.`
 
   const [argv, stdin] = store(await detect($), env_var, secret)
   const stored = await $.process.run(argv, { stdin })
   // Read it back: `security -i` exits 0 even when its command failed.
-  if ((await readSecret($, env_var)) !== secret) return `Could not save ${env_var} to the keychain. ${stored.stderr.trim()}`
+  if ((await readSecret($, env_var)) !== secret) return `Could not save ${env_var} to the keychain. ${stored.stderr.split(secret).join('[secret]').trim()}`
   values.set(env_var, secret)
   const names = await savedNames($)
   if (!names.includes(env_var)) await $.store.set('names', [...names, env_var])
@@ -136,7 +149,7 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'mcp__secrets__ask_secret' }, async ($, e, next) => {
     const { env_var, reason = '', replace = false } = e as unknown as { env_var: string; reason?: string; replace?: boolean }
-    if (!ENV_NAME.test(env_var)) return { result: `${env_var} is not a valid environment variable name.` }
+    if (!validName(env_var)) return { result: `${env_var} is not a name a secret can take.` }
     await load($)
     if (values.has(env_var) && !replace) return { result: `${env_var} is already saved; use $${env_var} in Bash.` }
     return { result: await ask($, env_var, reason, next.signal) }
@@ -149,23 +162,20 @@ export const register: Register = on => {
       const names = [...values.keys()]
       return { text: names.length ? `Saved secrets: ${names.map(n => `$${n}`).join(', ')}` : 'No secrets saved. Use /secret NAME.' }
     }
-    if (!ENV_NAME.test(env_var)) return { text: `${env_var} is not a valid environment variable name.` }
+    if (!validName(env_var)) return { text: `${env_var} is not a name a secret can take.` }
     return { text: await ask($, env_var, 'Added with /secret', next.signal) }
   })
 
-  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+  // Bash gets the keys; every tool's result (Bash, Read, Grep, background output) is scrubbed of them.
+  on('tool.call', async ($, e, next) => {
     await load($)
     if (values.size === 0) return next(e)
     const current = await detect($)
     const exports = [...values.keys()].map(n => `export ${n}="$(${lookup(current, n).map(sh).join(' ')})"`).join('\n')
-    const ran = await next({ ...e, command: `${exports}\n${e.command}` })
-    const out = ran.result as { stdout: string; stderr: string } | string | null | undefined
-    if (typeof out === 'string') return redact(out) === out ? ran : { result: redact(out), isError: ran.isError }
-    if (typeof out?.stdout !== 'string') return ran
-    const stdout = redact(out.stdout)
-    const stderr = redact(out.stderr)
-    if (stdout === out.stdout && stderr === out.stderr) return ran
-    return { result: { ...out, stdout, stderr }, isError: ran.isError }
+    const ran = await next(e.tool === 'Bash' ? { ...e, command: `${exports}\n${e.command}` } : e)
+    if (ran.result === undefined) return ran
+    const result = scrub(ran.result)
+    return JSON.stringify(result) === JSON.stringify(ran.result) ? ran : { ...ran, result }
   }).catch(($, e, next) => (next.called ? { deny: 'secrets: redaction failed, output withheld.' } : next(e)))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

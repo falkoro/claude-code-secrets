@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { store, unmask } from './register'
+import { store, unmask, validName } from './register'
 
 test('unmask recovers the typed value from the bullets', () => {
   expect(unmask('', 'sk-abc')).toBe('sk-abc')
@@ -45,3 +45,23 @@ for (const c of cases) {
     expect((ran.result as { stdout: string }).stdout).toBe('key=[secret:OPENAI_API_KEY]')
   })
 }
+
+test('a secret cannot take a name that steers the shell', () => {
+  for (const n of ['PATH', 'path', 'BASH_ENV', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'GIT_SSH_COMMAND', 'PYTHONSTARTUP', 'PROMPT_COMMAND', 'X;rm', ''])
+    expect(validName(n)).toBe(false)
+  for (const n of ['OPENAI_API_KEY', 'GITHUB_TOKEN', 'STRIPE_SECRET_KEY', 'db_password']) expect(validName(n)).toBe(true)
+})
+
+test('other tools are scrubbed too: Read of a .env', async ($, on) => {
+  mock.store(on, { names: ['OPENAI_API_KEY'] })
+  mock.env(on, {})
+  on('process.run', ($, e) => ({
+    value: { exitCode: 0, stdout: e.argv[0] === 'uname' ? 'Linux\n' : 'sk-live-1234567890', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('tool.call', { tool: 'Read' }, () => ({ result: { type: 'text', file: { filePath: '.env', content: '1\tOPENAI_API_KEY=sk-live-1234567890' } } }))
+
+  const ran = await $.tool.call({ tool: 'Read', file_path: '.env' })
+
+  expect(JSON.stringify(ran.result)).not.toContain('sk-live')
+  expect(JSON.stringify(ran.result)).toContain('OPENAI_API_KEY=[secret:OPENAI_API_KEY]')
+})

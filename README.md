@@ -33,7 +33,8 @@ From then on, every Bash command Claude runs starts with `export OPENAI_API_KEY=
 
 ## Limits
 
-- Redaction covers **Bash output only**. If Claude reads a `.env` file with Read, it still sees the key, and a transformed key (base64, say) isn't caught.
+- Redaction hides the exact key in **every tool's output** (Bash, Read, Grep, …). A transformed key (base64, say) isn't caught.
+- Keys shorter than 8 characters aren't saved (too short to redact), and names that steer the shell (`PATH`, `BASH_ENV`, `LD_*`, `GIT_*`, …) are refused.
 - Claude Code's text field has no mask option yet, so each keystroke shows for about 15 ms before it becomes a bullet.
 - A mod can't take the keyboard by itself: the field takes keys after **ctrl+x tab** or a click.
 - I've tested it live on Linux. The macOS and Windows paths are covered by unit tests only so far; issues and PRs welcome.
